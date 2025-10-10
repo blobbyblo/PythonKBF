@@ -5,6 +5,8 @@ import sys, time, math, random, webbrowser
 from datetime import datetime
 import pyautogui as pag
 import pygetwindow as gw
+import requests
+import traceback
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DEBUG_SKIP_JOIN = False
@@ -86,7 +88,41 @@ def mark_player_moved():
     player_moved = True
 
 def log(msg): print(f"[{datetime.now().time()}] {msg}")
-def error_exit(msg, code=1): print(f"[ERROR] {msg}"); sys.exit(code)
+def error_exit(msg, code=1): print(f"[ERROR] {msg}"); raise Exception(msg)
+
+# ── Discord Integration ───────────────────────────────────────────────────────
+def send_discord_window_screenshot(message=""):
+    w = get_window_exact("Roblox")
+    if not w:
+        log(f"[!] Could not find Roblox for Discord capture.")
+        return False
+
+    # Take screenshot of the window region
+    region = (w.left, w.top, w.width, w.height)
+    from io import BytesIO
+    buf = BytesIO()
+    pag.screenshot(region=region).save(buf, format="PNG")
+    buf.seek(0)
+
+    # Compose webhook message
+    payload = {
+        "content": message or f"Roblox Capture"
+    }
+    files = {
+        "file": ("screenshot.png", buf, "image/png")
+    }
+
+    try:
+        r = requests.post("https://discord.com/api/webhooks/1425899499548836001/WQ2eSna8caRj5s32iDbrCPqPKw96MxOvYQiAccWHXgp7A_aldwkk1F8sqmlLqpmHHuah", data=payload, files=files, timeout=15)
+        if r.status_code >= 200 and r.status_code < 300:
+            log(f"[✓] Screenshot sent to Discord ({r.status_code})")
+            return True
+        else:
+            log(f"[!] Discord webhook failed: HTTP {r.status_code}")
+            return False
+    except Exception as e:
+        log(f"[!] Discord webhook error: {e}")
+        return False
 
 # ── WINDOWS: SendInput (mouse/wheel/keyboard scan-codes) ──────────────────────
 IS_WINDOWS = sys.platform.startswith("win")
@@ -431,7 +467,7 @@ def _should_tame_now():
     """True of any minute 17 or 47; debounced per minute."""
     global last_tame_minute
     now = datetime.now()
-    if now.minute in (17, 18, 19, 47, 48, 49):
+    if now.minute in (17, 18, 47, 48):
         return True
     return False
 
@@ -570,6 +606,8 @@ def kb_click_and_record_reward(w, save_dir="treat_logs"):
     pre_click_nudge(); hardware_click()
     time.sleep(1.5)  # little animation
 
+    send_discord_window_screenshot("New loot just dropped!")
+
     # Snapshot the center where the reward appears
     os.makedirs(save_dir, exist_ok=True)
     cx, cy = window_center(w)
@@ -593,7 +631,6 @@ def try_tame_kittybat_once(w) -> bool:
     """
     global last_tame_time
     if time.time() < last_tame_time:
-        log("[TAME] Too fast! Aborting tame.")
         return False
 
     # Step 0: back into the area
@@ -621,10 +658,19 @@ def try_tame_kittybat_once(w) -> bool:
     # Step 2: animation + 'E' prompt
     time.sleep(8.0)
     log("[TAME] Pressing E to start…")
-    try:
-        hardware_key_hold('e', 0.05)  # quick tap
-    except Exception:
-        pass
+    box = locate_on_screen(BLUE_E_PATH, confidence=0.77, timeout=3.0, region=full_window_region(w))
+    if not box:
+        log("[TAME] E button not found; aborting tame.")
+        time.sleep(5.0)
+        log("[TAME] Returning to bag loop position (W 1.5s, then W+A 0.15s)…")
+        hardware_key_hold('w', 1)
+        hardware_key_combo_hold(('w', 'a'), 0.15)
+        hardware_key_hold('w', 0.2)
+        mark_player_moved()
+        last_tame_time = time.time() + (5 * 60)
+        return False
+    cx, cy = pag.center(box)
+    human_move_to(cx, cy); pre_click_nudge(); hardware_click()
 
     # Step 3: minigame – pre-hover the green Catch button
     log("[TAME] Waiting for Catch button + skill icon…")
@@ -644,32 +690,58 @@ def try_tame_kittybat_once(w) -> bool:
     cx_c, cy_c = pag.center(catch)
     human_move_to(cx_c, cy_c); pre_click_nudge()  # hover to minimize click latency
 
+    send_discord_window_screenshot("Can we tame it?")
+
     # Step 4: watch for the red puck over the skill icon and click instantly
     ix, iy = pag.center(icon)
     ix, iy = int(ix), int(iy)
     log("[TAME] Waiting for red puck over skill icon…")
+
     t_end = time.time() + 8.0
     clicked = False
-    while time.time() < t_end:
-        try:
-            icon_visible = locate_on_screen(SKILL_CAT_ICON_PATH, confidence=0.80, timeout=0.05, region=full_window_region(w))
-            if not icon_visible:
-                hardware_click()
+
+    # Let the UI settle so we don't sample during the transition
+    time.sleep(0.40)
+
+    # Temporarily remove pyautogui pause to minimize latency during this loop
+    _old_pause = pag.PAUSE
+    pag.PAUSE = 0.0
+    try:
+        while time.time() < t_end:
+            # Sample a 50x50 box centered on the skill icon
+            region = (ix - 25, iy - 25, 50, 50)
+            ss = pag.screenshot(region=region)
+
+            # Count "red-dominant" pixels in a coarse grid
+            redish = 0
+            for x in range(6, 44, 6):
+                for y in range(6, 44, 6):
+                    r, g, b = ss.getpixel((x, y))
+                    if r > 170 and (r - g) > 40 and (r - b) > 40:
+                        redish += 1
+
+            if redish >= 4:  # several red-dominant hits ⇒ bar is over the icon
+                hardware_click_no_tui()
                 clicked = True
-                log("[TAME] Catch attempted via icon occlusion.")
+                log("[TAME] Catch via red-bar detection.")
                 break
-            # fallback color check
-            ss = pag.screenshot(region=(ix - 2, iy - 2, 4, 4))
-            pr, pg, pb = ss.getpixel((2, 2))
-            if pr > 170 and (pr - pg) > 40 and (pr - pb) > 40:
-                hardware_click()
+
+            # Light-touch fallback: very small template check with a real timeout
+            if not locate_on_screen(
+                SKILL_CAT_ICON_PATH, confidence=0.78, timeout=0.18,
+                region=_region_around(ix, iy, 110, 110)
+            ):
+                hardware_click_no_tui()
                 clicked = True
-                log("[TAME] Catch via red pixel fallback.")
+                log("[TAME] Catch via icon-occlusion fallback.")
                 break
-            time.sleep(0.01)
-        except Exception:
-            pass
-        time.sleep(0.01)  # tight loop for responsiveness
+
+            # Ultra-tight loop for responsiveness
+            time.sleep(0.001)
+    finally:
+        pag.PAUSE = _old_pause
+
+    send_discord_window_screenshot("Guess so...")
 
     # Step 5: exit animation & walk back to the bag loop spot
     time.sleep(5.0)
@@ -681,6 +753,7 @@ def try_tame_kittybat_once(w) -> bool:
     last_tame_time = time.time() + (5 * 60)
     return clicked
 
+BUTTON_FINDER_ERROR = 0
 def kittybat_bag_once(w):
     """
     One pass of the kittybat→bag logic:
@@ -689,14 +762,19 @@ def kittybat_bag_once(w):
       - If READY: click, record reward, update last-claim time
     Returns one of: "TIMER", "READY+CLAIMED", "NOT_FOUND", "UNKNOWN"
     """
-    global kb_anchor, kb_anchor_box, player_moved, kb_last_claim_ts
+    global kb_anchor, kb_anchor_box, player_moved, kb_last_claim_ts, BUTTON_FINDER_ERROR
+
+    if BUTTON_FINDER_ERROR > 25:
+        raise Exception("Item was not found!")
 
     if player_moved or kb_anchor is None:
         kb_anchor, kb_anchor_box = kb_find_button(w, timeout=8.0)
         if kb_anchor is None:
-            log("[!] KittyBat button not found."); return "NOT_FOUND"
+            log("[!] KittyBat button not found.")
+            return "NOT_FOUND"
         player_moved = False
         log(f"[+] Anchored KittyBat button at {kb_anchor} (w:{kb_anchor_box.width} h:{kb_anchor_box.height})")
+        BUTTON_FINDER_ERROR = 0
 
     state = kb_hover_state(w, kb_anchor, kb_anchor_box)
     if state == "TIMER":
@@ -723,6 +801,7 @@ def kittybat_bag_once(w):
             return "READY+CLAIMED"
 
     log("[?] Button state unknown — will retry.")
+    BUTTON_FINDER_ERROR = BUTTON_FINDER_ERROR + 1
     return "UNKNOWN"
 
 def kittybat_bag_loop(w, timer_poll=15):
@@ -736,7 +815,7 @@ def kittybat_bag_loop(w, timer_poll=15):
     while True:
         result = kittybat_bag_once(w)
 
-        # — Tame window (XX:17 / XX:47) —
+        # — Tame window (XX:17 / XX:47) — we do XX:18/XX:48 only
         if _should_tame_now():
             log("[TAME] Window open (XX:17/XX:47) — attempting tame flow…")
             try:
@@ -848,9 +927,22 @@ def main():
     # We just moved → force a (re)find of the button on first loop iteration
     mark_player_moved()
 
+    send_discord_window_screenshot("Moved to the kittybat farm!")
+
     log("[+] Starting KittyBat → Bag loop (treat collection)…")
     kittybat_bag_loop(w, timer_poll=15)  # tweak as you like
     log("[✓] KittyBat loop finished.")
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print("\n[!] Stopped by user.\n")
+            break
+        except Exception as e:
+            # Short summary:
+            print(f"\n[!] Script crashed: {e.__class__.__name__}: {e}\n")
+            # Full stack trace:
+            traceback.print_exc()
+            time.sleep(2)
