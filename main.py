@@ -37,6 +37,7 @@ BLUE_FINGER_PATH  = "assets/blue_finger_button.png"
 BLUE_E_PATH       = "assets/blue_e_button.png"
 TIMER_OVERLAY_PATH= "assets/timer_overlay.png"
 NICE_BUTTON_PATH  = "assets/nice_button.png"
+BUTTON_FINDER_ERROR = 0
 
 # Kitty Bat taming assets
 YARN_APPLE_PATH     = "assets/yarn_apple_button.png"
@@ -57,7 +58,7 @@ TELEPORT_POST_WAIT     = 5.0   # after teleport (white screen)
 
 # Rotation timing (360° ≈ 3.0s on your rig)
 ROTATE_90_S            = 0.72
-ROTATE_180_S           = (ROTATE_90_S * 2) + 0.05
+ROTATE_180_S           = (ROTATE_90_S * 2)
 ROTATE_SETTLE          = 0.10   # tiny pause after a rotation
 
 # WASD path (UPDATED first W = 1.6s)
@@ -753,7 +754,6 @@ def try_tame_kittybat_once(w) -> bool:
     last_tame_time = time.time() + (5 * 60)
     return clicked
 
-BUTTON_FINDER_ERROR = 0
 def kittybat_bag_once(w):
     """
     One pass of the kittybat→bag logic:
@@ -765,6 +765,7 @@ def kittybat_bag_once(w):
     global kb_anchor, kb_anchor_box, player_moved, kb_last_claim_ts, BUTTON_FINDER_ERROR
 
     if BUTTON_FINDER_ERROR > 25:
+        BUTTON_FINDER_ERROR = 0
         raise Exception("Item was not found!")
 
     if player_moved or kb_anchor is None:
