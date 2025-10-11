@@ -57,7 +57,7 @@ SEARCH_TIMEOUT         = 25.0
 TELEPORT_POST_WAIT     = 5.0   # after teleport (white screen)
 
 # Rotation timing (360° ≈ 3.0s on your rig)
-ROTATE_90_S            = 0.72
+ROTATE_90_S            = 0.74
 ROTATE_180_S           = (ROTATE_90_S * 2)
 ROTATE_SETTLE          = 0.10   # tiny pause after a rotation
 
@@ -771,6 +771,7 @@ def kittybat_bag_once(w):
     if player_moved or kb_anchor is None:
         kb_anchor, kb_anchor_box = kb_find_button(w, timeout=8.0)
         if kb_anchor is None:
+            BUTTON_FINDER_ERROR = BUTTON_FINDER_ERROR + 1
             log("[!] KittyBat button not found.")
             return "NOT_FOUND"
         player_moved = False
