@@ -8,6 +8,12 @@ import pygetwindow as gw
 import requests
 import traceback
 
+import collections
+try:
+    import mss
+except Exception:
+    mss = None
+
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 DEBUG_SKIP_JOIN = False
 
@@ -196,6 +202,13 @@ else:
         pag.click()
     def hardware_click_no_tui(): pag.click()
     def hardware_scroll(lines: int): pag.scroll(int(lines))
+
+if IS_WINDOWS:
+    try:
+        timeBeginPeriod = ctypes.windll.winmm.timeBeginPeriod
+        timeBeginPeriod(1)
+    except Exception:
+        pass
 
 def hardware_key_combo_hold(keys, seconds):
     # press down all, wait, then release all (W+A for strafing, etc.)
@@ -625,6 +638,58 @@ def kb_click_and_record_reward(w, save_dir="treat_logs"):
     click_nice_with_retry(w, tries=40, interval=0.15)
     return path
 
+class HalfPeriodPredictor:
+    def __init__(self, alpha=0.35, initial=None):
+        self.half_period = initial  # seconds
+        self.alpha = alpha
+        self.last_hit = None
+
+    def observe_hit(self, t_now):
+        if self.last_hit is not None:
+            dt = t_now - self.last_hit  # half cycle between crossings
+            if dt > 0.12:  # ignore junk blips
+                if self.half_period is None:
+                    self.half_period = dt
+                else:
+                    self.half_period = self.alpha*dt + (1-self.alpha)*self.half_period
+        self.last_hit = t_now
+
+    def next_eta(self):
+        if self.last_hit is None or self.half_period is None:
+            return None
+        return self.last_hit + self.half_period
+
+def _count_redish(region, stride=6):
+    """
+    Super fast 'is it red here?' counter for a small region.
+    region=(x,y,w,h). Uses mss if available for low-latency capture.
+    """
+    x, y, w, h = region
+    if mss is not None:
+        with mss.mss() as sct:
+            img = sct.grab({"left": x, "top": y, "width": w, "height": h})
+            # raw BGRA -> iterate with stride
+            redish = 0
+            b = img.raw  # bytes; BGRA per pixel
+            stride_w = 4 * w
+            for yy in range(6, h-6, stride):
+                row = b[yy*stride_w:(yy+1)*stride_w]
+                for xx in range(6, w-6, stride):
+                    # order: B,G,R,A
+                    R = row[4*xx+2]; G = row[4*xx+1]; B = row[4*xx+0]
+                    if R > 170 and (R-G) > 40 and (R-B) > 40:
+                        redish += 1
+            return redish
+    # fallback: pyautogui (already imported as pag)
+    ss = pag.screenshot(region=region)
+    redish = 0
+    for xx in range(6, w-6, stride):
+        for yy in range(6, h-6, stride):
+            r, g, b = ss.getpixel((xx, yy))
+            if r > 170 and (r-g) > 40 and (r-b) > 40:
+                redish += 1
+    return redish
+
 def try_tame_kittybat_once(w) -> bool:
     """
     Walks to the tame spot, runs the slider minigame, and walks back.
@@ -693,54 +758,77 @@ def try_tame_kittybat_once(w) -> bool:
 
     send_discord_window_screenshot("Can we tame it?")
 
-    # Step 4: watch for the red puck over the skill icon and click instantly
+    # Step 4: predictive click over the skill icon
     ix, iy = pag.center(icon)
     ix, iy = int(ix), int(iy)
-    log("[TAME] Waiting for red puck over skill icon…")
+    log("[TAME] Predictive mode: calibrating one crossing, then pre-clicking the next…")
 
-    t_end = time.time() + 8.0
-    clicked = False
+    # Region exactly on top of the icon (small = fast)
+    probe = (ix - 25, iy - 25, 50, 50)
 
-    # Let the UI settle so we don't sample during the transition
-    time.sleep(0.40)
+    # Let the UI settle
+    time.sleep(0.30)
 
-    # Temporarily remove pyautogui pause to minimize latency during this loop
+    # Minimize pyautogui delays during timing loop
     _old_pause = pag.PAUSE
     pag.PAUSE = 0.0
-    try:
-        while time.time() < t_end:
-            # Sample a 50x50 box centered on the skill icon
-            region = (ix - 25, iy - 25, 50, 50)
-            ss = pag.screenshot(region=region)
 
-            # Count "red-dominant" pixels in a coarse grid
-            redish = 0
-            for x in range(6, 44, 6):
-                for y in range(6, 44, 6):
-                    r, g, b = ss.getpixel((x, y))
-                    if r > 170 and (r - g) > 40 and (r - b) > 40:
-                        redish += 1
+    predictor = HalfPeriodPredictor(alpha=0.35, initial=None)
+    clicked = False
+    t0 = time.perf_counter()
+    deadline = t0 + 8.0
 
-            if redish >= 4:  # several red-dominant hits ⇒ bar is over the icon
-                hardware_click_no_tui()
-                clicked = True
-                log("[TAME] Catch via red-bar detection.")
-                break
+    # 1) Get ONE real crossing to seed the predictor (may be late)
+    while time.perf_counter() < deadline:
+        if _count_redish(probe, stride=6) >= 4:
+            predictor.observe_hit(time.perf_counter())
+            break
+        # tiny sleep; ~1ms polling
+        time.sleep(0.001)
 
-            # Light-touch fallback: very small template check with a real timeout
-            if not locate_on_screen(
-                SKILL_CAT_ICON_PATH, confidence=0.78, timeout=0.18,
-                region=_region_around(ix, iy, 110, 110)
-            ):
-                hardware_click_no_tui()
-                clicked = True
-                log("[TAME] Catch via icon-occlusion fallback.")
-                break
+    # If we never saw a crossing, fall back to your current immediate-click logic
+    if predictor.last_hit is None:
+        # fallback: late click if it happens right now
+        if _count_redish(probe, stride=6) >= 4:
+            hardware_click_no_tui()
+            clicked = True
+            log("[TAME] Fallback: immediate catch on first crossing.")
+        else:
+            log("[TAME] Fallback: no calibration hit; giving up this attempt.")
+    else:
+        # 2) Predict the very next crossing and click slightly early
+        #    Tune lead_ms to your latency (display, input, Python overhead).
+        lead_ms = 60  # try 45–70 ms on your rig
+        # Track a few more hits to refine half-period while we wait
+        refine_until = min(deadline, time.perf_counter() + 1.0)
 
-            # Ultra-tight loop for responsiveness
-            time.sleep(0.001)
-    finally:
-        pag.PAUSE = _old_pause
+        while time.perf_counter() < refine_until:
+            if _count_redish(probe, stride=8) >= 4:
+                predictor.observe_hit(time.perf_counter())
+                # small de-bounce
+                time.sleep(0.02)
+            else:
+                time.sleep(0.004)
+
+        eta = predictor.next_eta()
+        if eta is not None:
+            fire_at = eta - (lead_ms / 1000.0)
+
+            # 3) Sleep coarse, spin fine
+            now = time.perf_counter()
+            if fire_at > now + 0.03:
+                time.sleep(fire_at - now - 0.02)  # leave ~20ms to spin
+
+            # Final spin for precision (no screenshots inside)
+            while time.perf_counter() < fire_at:
+                pass
+
+            hardware_click_no_tui()
+            clicked = True
+            log(f"[TAME] Predictive catch at t={time.perf_counter() - t0:.3f}s "
+                f"(lead={lead_ms}ms, halfT={predictor.half_period:.3f}s).")
+
+    pag.PAUSE = _old_pause
 
     send_discord_window_screenshot("Guess so...")
 
