@@ -759,17 +759,17 @@ def try_tame_kittybat_once(w) -> bool:
     send_discord_window_screenshot("Can we tame it?")
 
     # Step 4: predictive click over the skill icon
-    ix, iy = pag.center(icon)
+    ix, iy = pag.center(icon);
     ix, iy = int(ix), int(iy)
+
+    # ---- NEW: probe size + lenient threshold ----
+    probe = (ix - 35, iy - 35, 70, 70)  # a bit larger to not miss thin passes
+    HIT_MIN = 1  # was 4; brief passes are short!
+
     log("[TAME] Predictive mode: calibrating one crossing, then pre-clicking the next…")
 
-    # Region exactly on top of the icon (small = fast)
-    probe = (ix - 25, iy - 25, 50, 50)
+    time.sleep(0.30)  # UI settle
 
-    # Let the UI settle
-    time.sleep(0.30)
-
-    # Minimize pyautogui delays during timing loop
     _old_pause = pag.PAUSE
     pag.PAUSE = 0.0
 
@@ -778,51 +778,68 @@ def try_tame_kittybat_once(w) -> bool:
     t0 = time.perf_counter()
     deadline = t0 + 8.0
 
-    # 1) Get ONE real crossing to seed the predictor (may be late)
+    # 1) Seed with ONE real crossing (may be late)
     while time.perf_counter() < deadline:
-        if _count_redish(probe, stride=6) >= 4:
+        if _count_redish(probe, stride=8) >= HIT_MIN:
             predictor.observe_hit(time.perf_counter())
+            log("[TAME] Calibration: seeded first hit.")
             break
-        # tiny sleep; ~1ms polling
-        time.sleep(0.001)
+        time.sleep(0.001)  # tiny poll
 
-    # If we never saw a crossing, fall back to your current immediate-click logic
     if predictor.last_hit is None:
-        # fallback: late click if it happens right now
-        if _count_redish(probe, stride=6) >= 4:
+        # ---- NEW: explicit log + last-resort burst ----
+        log("[TAME] No calibration hit at all; executing phase-scan burst.")
+        # short sweep that usually lands one crossing even w/o vision
+        burst_start = time.perf_counter() + 0.20
+        spacing = 0.07  # 70 ms between clicks
+        for i in range(10):
+            fire_at = burst_start + i * spacing
+            while time.perf_counter() < fire_at:
+                pass  # spin for precision
             hardware_click_no_tui()
-            clicked = True
-            log("[TAME] Fallback: immediate catch on first crossing.")
-        else:
-            log("[TAME] Fallback: no calibration hit; giving up this attempt.")
-    else:
-        # 2) Predict the very next crossing and click slightly early
-        #    Tune lead_ms to your latency (display, input, Python overhead).
-        lead_ms = 60  # try 45–70 ms on your rig
-        # Track a few more hits to refine half-period while we wait
-        refine_until = min(deadline, time.perf_counter() + 1.0)
+        clicked = True
+        log("[TAME] Phase-scan burst sent (no-hit path).")
 
+    else:
+        # 2) Try to refine half-period quickly from another hit
+        refine_until = min(deadline, time.perf_counter() + 0.8)
+        hits_seen = 1
         while time.perf_counter() < refine_until:
-            if _count_redish(probe, stride=8) >= 4:
+            if _count_redish(probe, stride=10) >= HIT_MIN:
                 predictor.observe_hit(time.perf_counter())
-                # small de-bounce
-                time.sleep(0.02)
+                hits_seen += 1
+                time.sleep(0.015)  # debounce
             else:
-                time.sleep(0.004)
+                time.sleep(0.003)
+
+        log(f"[TAME] Calibration summary: hits_seen={hits_seen}, "
+            f"halfT={(f'{predictor.half_period:.3f}s' if predictor.half_period else 'None')}.")
 
         eta = predictor.next_eta()
-        if eta is not None:
-            fire_at = eta - (lead_ms / 1000.0)
 
-            # 3) Sleep coarse, spin fine
+        if eta is None:
+            # ---- NEW: handle 'one hit only' case explicitly ----
+            log("[TAME] Only one crossing observed; cannot estimate half-period. "
+                "Executing phase-scan burst.")
+            burst_start = time.perf_counter() + 0.12
+            spacing = 0.07
+            for i in range(10):
+                fire_at = burst_start + i * spacing
+                while time.perf_counter() < fire_at:
+                    pass
+                hardware_click_no_tui()
+            clicked = True
+            log("[TAME] Phase-scan burst sent (one-hit path).")
+
+        else:
+            # 3) Predict next crossing and click slightly early
+            lead_ms = 60  # tune 45–70 ms on your rig
+            fire_at = eta - (lead_ms / 1000.0)
             now = time.perf_counter()
             if fire_at > now + 0.03:
-                time.sleep(fire_at - now - 0.02)  # leave ~20ms to spin
-
-            # Final spin for precision (no screenshots inside)
+                time.sleep(fire_at - now - 0.02)  # coarse
             while time.perf_counter() < fire_at:
-                pass
-
+                pass  # fine spin
             hardware_click_no_tui()
             clicked = True
             log(f"[TAME] Predictive catch at t={time.perf_counter() - t0:.3f}s "
