@@ -660,35 +660,29 @@ class HalfPeriodPredictor:
         return self.last_hit + self.half_period
 
 def _count_redish(region, stride=6):
-    """
-    Super fast 'is it red here?' counter for a small region.
-    region=(x,y,w,h). Uses mss if available for low-latency capture.
-    """
     x, y, w, h = region
     if mss is not None:
         with mss.mss() as sct:
             img = sct.grab({"left": x, "top": y, "width": w, "height": h})
-            # raw BGRA -> iterate with stride
-            redish = 0
-            b = img.raw  # bytes; BGRA per pixel
+            b = img.raw
             stride_w = 4 * w
-            for yy in range(6, h-6, stride):
-                row = b[yy*stride_w:(yy+1)*stride_w]
-                for xx in range(6, w-6, stride):
-                    # order: B,G,R,A
-                    R = row[4*xx+2]; G = row[4*xx+1]; B = row[4*xx+0]
-                    if R > 170 and (R-G) > 40 and (R-B) > 40:
+            redish = 0
+            for yy in range(4, h - 4, stride):
+                row = b[yy * stride_w:(yy + 1) * stride_w]
+                for xx in range(4, w - 4, stride):
+                    R = row[4 * xx + 2]; G = row[4 * xx + 1]; B = row[4 * xx + 0]
+                    if R > 150 and (R - G) > 35 and (R - B) > 35:
                         redish += 1
             return redish
-    # fallback: pyautogui (already imported as pag)
-    ss = pag.screenshot(region=region)
-    redish = 0
-    for xx in range(6, w-6, stride):
-        for yy in range(6, h-6, stride):
-            r, g, b = ss.getpixel((xx, yy))
-            if r > 170 and (r-g) > 40 and (r-b) > 40:
-                redish += 1
-    return redish
+    else:
+        ss = pag.screenshot(region=region)
+        redish = 0
+        for xx in range(4, w - 4, stride):
+            for yy in range(4, h - 4, stride):
+                r, g, b = ss.getpixel((xx, yy))
+                if r > 150 and (r - g) > 35 and (r - b) > 35:
+                    redish += 1
+        return redish
 
 def try_tame_kittybat_once(w) -> bool:
     """
@@ -758,96 +752,68 @@ def try_tame_kittybat_once(w) -> bool:
 
     send_discord_window_screenshot("Can we tame it?")
 
-    # Step 4: predictive click over the skill icon
-    ix, iy = pag.center(icon);
+    # Step 4: predictive click over the skill icon (failsafe-tolerant, routed + screenshot tag)
+    ix, iy = pag.center(icon)
     ix, iy = int(ix), int(iy)
 
-    # ---- NEW: probe size + lenient threshold ----
-    probe = (ix - 35, iy - 35, 70, 70)  # a bit larger to not miss thin passes
-    HIT_MIN = 1  # was 4; brief passes are short!
-
-    log("[TAME] Predictive mode: calibrating one crossing, then pre-clicking the next…")
-
-    time.sleep(0.30)  # UI settle
-
-    _old_pause = pag.PAUSE
-    pag.PAUSE = 0.0
-
-    predictor = HalfPeriodPredictor(alpha=0.35, initial=None)
-    clicked = False
+    probe = (ix - 30, iy + 10, 60, 40)  # mouth zone
+    predictor = HalfPeriodPredictor(alpha=0.45)
+    prev = _count_redish(probe, stride=6)
+    hits = 0
     t0 = time.perf_counter()
-    deadline = t0 + 8.0
+    route = "timeout"  # default; will be overwritten on success paths
+    halfT = None
+    lead_ms = None
 
-    # 1) Seed with ONE real crossing (may be late)
-    while time.perf_counter() < deadline:
-        if _count_redish(probe, stride=8) >= HIT_MIN:
+    # 1) Try to measure one oscillation
+    while hits < 2 and time.perf_counter() - t0 < 3.0:
+        cur = _count_redish(probe, stride=6)
+        if cur - prev > 8:  # rising edge entering red
             predictor.observe_hit(time.perf_counter())
-            log("[TAME] Calibration: seeded first hit.")
-            break
-        time.sleep(0.001)  # tiny poll
+            hits += 1
+            time.sleep(0.03)
+        prev = cur
 
-    if predictor.last_hit is None:
-        # ---- NEW: explicit log + last-resort burst ----
-        log("[TAME] No calibration hit at all; executing phase-scan burst.")
-        # short sweep that usually lands one crossing even w/o vision
-        burst_start = time.perf_counter() + 0.20
-        spacing = 0.07  # 70 ms between clicks
-        for i in range(10):
-            fire_at = burst_start + i * spacing
-            while time.perf_counter() < fire_at:
-                pass  # spin for precision
-            hardware_click_no_tui()
-        clicked = True
-        log("[TAME] Phase-scan burst sent (no-hit path).")
+    # 2) Predictive path
+    if predictor.half_period is not None:
+        halfT = predictor.half_period
+        # If your last result was a smidge late, bump the lead a touch (+3–5 ms).
+        lead_ms = max(30, min(46, halfT * 58)) + 6
+        eta = predictor.next_eta() - (lead_ms / 1000.0)
+        now = time.perf_counter()
+        if eta > now + 0.02:
+            time.sleep(eta - now - 0.01)
+        while time.perf_counter() < eta:
+            pass
+        hardware_click_no_tui()
+        route = "predictive"
 
     else:
-        # 2) Try to refine half-period quickly from another hit
-        refine_until = min(deadline, time.perf_counter() + 0.8)
-        hits_seen = 1
-        while time.perf_counter() < refine_until:
-            if _count_redish(probe, stride=10) >= HIT_MIN:
-                predictor.observe_hit(time.perf_counter())
-                hits_seen += 1
-                time.sleep(0.015)  # debounce
-            else:
-                time.sleep(0.003)
-
-        log(f"[TAME] Calibration summary: hits_seen={hits_seen}, "
-            f"halfT={(f'{predictor.half_period:.3f}s' if predictor.half_period else 'None')}.")
-
-        eta = predictor.next_eta()
-
-        if eta is None:
-            # ---- NEW: handle 'one hit only' case explicitly ----
-            log("[TAME] Only one crossing observed; cannot estimate half-period. "
-                "Executing phase-scan burst.")
-            burst_start = time.perf_counter() + 0.12
-            spacing = 0.07
-            for i in range(10):
-                fire_at = burst_start + i * spacing
-                while time.perf_counter() < fire_at:
-                    pass
+        # 3) Visual coverage path
+        start_wait = time.perf_counter()
+        clicked = False
+        while time.perf_counter() - start_wait < 6.0:
+            coverage = _count_redish(probe, stride=5)
+            if coverage > 25:  # confidently red-covered
                 hardware_click_no_tui()
-            clicked = True
-            log("[TAME] Phase-scan burst sent (one-hit path).")
+                route = "coverage"
+                clicked = True
+                break
+            time.sleep(0.002)
 
-        else:
-            # 3) Predict next crossing and click slightly early
-            lead_ms = 60  # tune 45–70 ms on your rig
-            fire_at = eta - (lead_ms / 1000.0)
-            now = time.perf_counter()
-            if fire_at > now + 0.03:
-                time.sleep(fire_at - now - 0.02)  # coarse
-            while time.perf_counter() < fire_at:
-                pass  # fine spin
+        # 4) Hard timeout → single click to unblock (will be labeled "timeout")
+        if not clicked:
             hardware_click_no_tui()
-            clicked = True
-            log(f"[TAME] Predictive catch at t={time.perf_counter() - t0:.3f}s "
-                f"(lead={lead_ms}ms, halfT={predictor.half_period:.3f}s).")
 
-    pag.PAUSE = _old_pause
+    clicked = True
 
-    send_discord_window_screenshot("Guess so...")
+    # Minimal, high-signal telemetry (one line) + Discord tag
+    log(f"[TAME] Click route={route} "
+        f"{'(halfT=' + f'{halfT:.3f}s' + ', lead=' + f'{lead_ms:.0f}ms' + ')' if halfT else ''}")
+    send_discord_window_screenshot(
+        f"Catch attempt → route={route}"
+        + (f" | halfT={halfT:.3f}s lead≈{lead_ms:.0f}ms" if halfT else "")
+    )
 
     # Step 5: exit animation & walk back to the bag loop spot
     time.sleep(5.0)
