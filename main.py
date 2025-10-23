@@ -778,7 +778,7 @@ def try_tame_kittybat_once(w) -> bool:
     if predictor.half_period is not None:
         halfT = predictor.half_period
         # If your last result was a smidge late, bump the lead a touch (+3–5 ms).
-        lead_ms = max(30, min(46, halfT * 58)) + 6
+        lead_ms = max(30, min(46, halfT * 42))
         eta = predictor.next_eta() - (lead_ms / 1000.0)
         now = time.perf_counter()
         if eta > now + 0.02:
