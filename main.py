@@ -97,6 +97,22 @@ def mark_player_moved():
 def log(msg): print(f"[{datetime.now().time()}] {msg}")
 def error_exit(msg, code=1): print(f"[ERROR] {msg}"); raise Exception(msg)
 
+def close_browser_windows(title_hint="Adopt Me"):
+    """Closes any browser windows matching the given title hint."""
+    try:
+        for w in gw.getAllWindows():
+            t = (w.title or "").lower()
+            if title_hint.lower() in t:
+                log(f"[×] Closing browser window: {w.title}")
+                try:
+                    w.close()
+                except Exception:
+                    pass
+                time.sleep(0.5)
+    except Exception as e:
+        log(f"[!] Could not close browser windows: {e}")
+
+
 # ── Discord Integration ───────────────────────────────────────────────────────
 def send_discord_window_screenshot(message=""):
     w = get_window_exact("Roblox")
@@ -251,6 +267,7 @@ def get_window_exact(title_exact):
     return None
 
 def window_center(w): return (w.left + w.width//2, w.top + w.height//2)
+def window_right(w): return (w.left + w.width//2 + w.width//4, w.top + w.height//2)
 
 def focus_roblox_exact_and_prime(title_exact, timeout=12.0):
     t0 = time.time()
@@ -417,6 +434,7 @@ def click_teleporter_icon(w, timeout=8.0) -> bool:
     return locate_and_click(TELEPORTER_PATH, confidence=0.85, timeout=timeout, region=region)
 
 def center_mouse_in_window(w): human_move_to(*window_center(w))
+def right_mouse_in_window(w): human_move_to(*window_right(w))
 def scroll_in_window(w, lines:int):
     center_mouse_in_window(w); pre_click_nudge(); hardware_scroll(lines); time.sleep(0.08)
 
@@ -579,7 +597,7 @@ def kb_find_button(w, timeout=8.0):
             time.sleep(0.20)
             continue
 
-        center_mouse_in_window(w); pre_click_nudge()
+        right_mouse_in_window(w); pre_click_nudge()
 
         # Try middle-row-ish buttons first (often the right ones)
         cy_mid = w.top + w.height // 2
@@ -778,7 +796,7 @@ def try_tame_kittybat_once(w) -> bool:
     if predictor.half_period is not None:
         halfT = predictor.half_period
         # If your last result was a smidge late, bump the lead a touch (+3–5 ms).
-        lead_ms = max(30, min(46, halfT * 42))
+        lead_ms = max(30, min(46, halfT * 42)) + 4
         eta = predictor.next_eta() - (lead_ms / 1000.0)
         now = time.perf_counter()
         if eta > now + 0.02:
@@ -835,7 +853,7 @@ def kittybat_bag_once(w):
     """
     global kb_anchor, kb_anchor_box, player_moved, kb_last_claim_ts, BUTTON_FINDER_ERROR
 
-    if BUTTON_FINDER_ERROR > 25:
+    if BUTTON_FINDER_ERROR > 5:
         BUTTON_FINDER_ERROR = 0
         raise Exception("Item was not found!")
 
@@ -921,6 +939,56 @@ def kittybat_bag_loop(w, timer_poll=15):
             time.sleep(2)
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
+# -- Fullscreen helper using existing SendInput plumbing --
+if IS_WINDOWS:
+    _GetSystemMetrics = ctypes.windll.user32.GetSystemMetrics
+    _SM_CXSCREEN, _SM_CYSCREEN = 0, 1
+
+    def _screen_size():
+        return _GetSystemMetrics(_SM_CXSCREEN), _GetSystemMetrics(_SM_CYSCREEN)
+
+    def _is_screen_sized(w, tol: int = 2) -> bool:
+        """Heuristic: window is at (0,0) and equals primary screen size (±tol)."""
+        sw, sh = _screen_size()
+        return (abs(getattr(w, "left", 0)) <= tol and
+                abs(getattr(w, "top", 0))  <= tol and
+                abs(getattr(w, "width", 0)  - sw) <= tol and
+                abs(getattr(w, "height", 0) - sh) <= tol)
+
+    def _press_f11():
+        # F11 uses scancode 0x57; not an extended key.
+        _send_keyboard_sc(0x57, is_up=False, extended=False)
+        _send_keyboard_sc(0x57, is_up=True,  extended=False)
+
+    def ensure_fullscreen_if_needed(window_title_exact: str, retries: int = 2, settle: float = 0.9) -> bool:
+        """
+        Focus must already be on Roblox. Only toggles F11 if the window isn't screen-sized.
+        Returns True if fullscreen/screen-sized confirmed, else False.
+        """
+        w = get_window_exact(window_title_exact)
+        if not w:
+            log("[!] ensure_fullscreen_if_needed: window not found.")
+            return False
+
+        for _ in range(retries + 1):
+            if _is_screen_sized(w):
+                log("[✓] Already fullscreen/screen-sized.")
+                return True
+
+            log("[i] Not screen-sized — sending F11 via SendInput.")
+            _press_f11()
+            time.sleep(settle)
+
+            # Fullscreen can reparent/resize; re-focus & refresh geometry
+            focus_roblox_exact_and_prime(window_title_exact, timeout=4.0)
+            w2 = get_window_exact(window_title_exact) or w
+            if _is_screen_sized(w2):
+                log("[✓] Fullscreen confirmed.")
+                return True
+            w = w2
+
+        log("[!] Could not confirm fullscreen; continuing in windowed mode.")
+        return False
 
 def main():
     if DEBUG_SKIP_JOIN:
@@ -942,9 +1010,14 @@ def main():
         log(f"[+] Waiting {LAUNCHER_SPINUP_WAIT:.0f}s for Roblox client to appear…")
         time.sleep(LAUNCHER_SPINUP_WAIT)
 
+        # NEW: Close the browser before focusing the Roblox client
+        close_browser_windows(BROWSER_TITLE_HINT)
+
     log("[+] Focusing Roblox app and priming input (center + nudge + low-level click)")
     if not focus_roblox_exact_and_prime(ROBLOX_WINDOW_EXACT, timeout=12.0):
         error_exit(f"Could not focus/prime the Roblox window titled exactly: '{ROBLOX_WINDOW_EXACT}'")
+
+    ensure_fullscreen_if_needed(ROBLOX_WINDOW_EXACT)
 
     w = get_window_exact(ROBLOX_WINDOW_EXACT)
     if not w: error_exit("Roblox window vanished before clicking GREEN Play.")
