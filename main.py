@@ -1005,6 +1005,7 @@ def main():
 
         log("[+] Clicking BLUE Play…")
         if not locate_and_click(BLUE_PLAY_PATH, confidence=0.85, timeout=12.0):
+            close_browser_windows(BROWSER_TITLE_HINT)
             error_exit("Could not locate/click the BLUE Play button image on the browser page.")
 
         log(f"[+] Waiting {LAUNCHER_SPINUP_WAIT:.0f}s for Roblox client to appear…")
