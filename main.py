@@ -1039,31 +1039,34 @@ def main():
     handle_dailies_if_present(w, max_panels=4, overall_timeout=12.0)
 
     if not DEBUG_SKIP_JOIN:
-        log("[+] Finding & clicking the teleporter icon (left-center)…")
-        if not click_teleporter_icon(w, timeout=8.0):
-            error_exit("Could not find/click the teleporter icon in the left-center region.")
-
-        log("[+] Task board open — scrolling for Haunted Island → Teleport…")
-        if not find_card_then_teleport(w, max_scrolls=24):
-            error_exit("Could not find Haunted Island card + Teleport button after scrolling.")
-
-        log(f"[+] Teleported — waiting {TELEPORT_POST_WAIT:.1f}s for scene to appear…")
-        time.sleep(TELEPORT_POST_WAIT)
-
-        # ── NEW: Orientation detection and rotation to NORTH
         log("[+] Detecting current orientation from top-center landmark…")
         facing = detect_cardinal(w, tries=14, conf=0.83)
-        if not facing:
-            error_exit("Could not detect cardinal orientation from templates.")
-        log(f"[✓] Detected orientation: {facing.upper()}")
-        if not rotate_to_north(facing):
-            error_exit("Failed to rotate to north based on detected orientation.")
+        if facing != 'north':
+            log("[+] Finding & clicking the teleporter icon (left-center)…")
+            if not click_teleporter_icon(w, timeout=8.0):
+                error_exit("Could not find/click the teleporter icon in the left-center region.")
 
-        # Optional re-check (one pass); if still not north, try once more
-        recheck = detect_cardinal(w, tries=6, conf=0.83)
-        if recheck and recheck != 'north':
-            log(f"[i] Re-check shows {recheck}; correcting once more.")
-            rotate_to_north(recheck)
+            log("[+] Task board open — scrolling for Haunted Island → Teleport…")
+            if not find_card_then_teleport(w, max_scrolls=24):
+                error_exit("Could not find Haunted Island card + Teleport button after scrolling.")
+
+            log(f"[+] Teleported — waiting {TELEPORT_POST_WAIT:.1f}s for scene to appear…")
+            time.sleep(TELEPORT_POST_WAIT)
+
+            # ── NEW: Orientation detection and rotation to NORTH
+            log("[+] Detecting current orientation from top-center landmark…")
+            facing = detect_cardinal(w, tries=14, conf=0.83)
+            if not facing:
+                error_exit("Could not detect cardinal orientation from templates.")
+            log(f"[✓] Detected orientation: {facing.upper()}")
+            if not rotate_to_north(facing):
+                error_exit("Failed to rotate to north based on detected orientation.")
+
+            # Optional re-check (one pass); if still not north, try once more
+            recheck = detect_cardinal(w, tries=6, conf=0.83)
+            if recheck and recheck != 'north':
+                log(f"[i] Re-check shows {recheck}; correcting once more.")
+                rotate_to_north(recheck)
 
         # Walk the path
         log("[+] Running WASD path…")
