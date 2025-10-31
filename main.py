@@ -783,47 +783,46 @@ def try_tame_kittybat_once(w) -> bool:
     halfT = None
     lead_ms = None
 
-    # 1) Try to measure one oscillation
-    while hits < 2 and time.perf_counter() - t0 < 3.0:
-        cur = _count_redish(probe, stride=6)
-        if cur - prev > 8:  # rising edge entering red
-            predictor.observe_hit(time.perf_counter())
-            hits += 1
-            time.sleep(0.03)
-        prev = cur
+    # 3) Visual coverage path
+    start_wait = time.perf_counter()
+    clicked = False
+    while time.perf_counter() - start_wait < 6.0:
+        coverage = _count_redish(probe, stride=5)
+        if coverage > 25:  # confidently red-covered
+            hardware_click_no_tui()
+            route = "coverage"
+            clicked = True
+            break
+        time.sleep(0.002)
+    if not clicked:
+        # 1) Try to measure one oscillation
+        while hits < 2 and time.perf_counter() - t0 < 3.0:
+            cur = _count_redish(probe, stride=6)
+            if cur - prev > 8:  # rising edge entering red
+                predictor.observe_hit(time.perf_counter())
+                hits += 1
+                time.sleep(0.03)
+            prev = cur
 
-    # 2) Predictive path
-    if predictor.half_period is not None:
-        halfT = predictor.half_period
-        # If your last result was a smidge late, bump the lead a touch (+3–5 ms).
-        lead_ms = max(30, min(46, halfT * 42)) + 4
-        eta = predictor.next_eta() - (lead_ms / 1000.0)
-        now = time.perf_counter()
-        if eta > now + 0.02:
-            time.sleep(eta - now - 0.01)
-        while time.perf_counter() < eta:
-            pass
-        hardware_click_no_tui()
-        route = "predictive"
-
-    else:
-        # 3) Visual coverage path
-        start_wait = time.perf_counter()
-        clicked = False
-        while time.perf_counter() - start_wait < 6.0:
-            coverage = _count_redish(probe, stride=5)
-            if coverage > 25:  # confidently red-covered
-                hardware_click_no_tui()
-                route = "coverage"
-                clicked = True
-                break
-            time.sleep(0.002)
+        # 2) Predictive path
+        if predictor.half_period is not None:
+            halfT = predictor.half_period
+            # If your last result was a smidge late, bump the lead a touch (+3–5 ms).
+            lead_ms = max(30, min(46, halfT * 42)) + 4
+            eta = predictor.next_eta() - (lead_ms / 1000.0)
+            now = time.perf_counter()
+            if eta > now + 0.02:
+                time.sleep(eta - now - 0.01)
+            while time.perf_counter() < eta:
+                pass
+            hardware_click_no_tui()
+            clicked = True
+            route = "predictive"
 
         # 4) Hard timeout → single click to unblock (will be labeled "timeout")
         if not clicked:
             hardware_click_no_tui()
-
-    clicked = True
+            clicked = True
 
     # Minimal, high-signal telemetry (one line) + Discord tag
     log(f"[TAME] Click route={route} "
